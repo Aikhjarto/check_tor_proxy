@@ -1,0 +1,181 @@
+#!/bin/bash
+# Nagios/Icinga plugin to check that a proxy exits to the Tor network.
+#
+# Copyright (C) 2026 Thomas Wagner <wagner-thomas@gmx.at>
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+VERSION="0.1"
+
+# error messages of wget and the decimal point of awk in English
+export LC_ALL=C
+
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+
+HOST=""
+PORT=""
+TYPE="socks5"
+TIMEOUT=30
+URL="https://check.torproject.org/api/ip"
+TOOL="auto"
+WARN=""
+CRIT=""
+SHOW_IP=""
+
+usage()
+{
+cat << EOF
+usage: check_tor_proxy -H HOST [-p PORT] [-T socks5|http] [-t SECONDS] [-w SECONDS] [-c SECONDS]
+                       [-C curl|wget] [-u URL] [-i]
+Checks that a proxy exits to the Tor network, by asking $URL through it.
+OPTIONS:
+ -H	host name or address of the proxy (required)
+ -p	port of the proxy (default: 9050 for socks5, 8118 for http)
+ -T	type of the proxy: socks5, e.g. Tor itself, or http, e.g. Privoxy in front of Tor (default: socks5)
+ -t	timeout in seconds for the whole request (default: $TIMEOUT)
+ -w	WARNING if the answer takes longer than this many seconds
+ -c	CRITICAL if the answer takes longer than this many seconds
+ -C	tool to use: curl or wget (default: curl if installed, else wget; socks5 needs curl)
+ -u	URL to ask (default: $URL)
+ -i	also show the exit IP if it is not a Tor exit; it is then usually your real address
+ -h	show this help
+ -V	show the version
+EOF
+}
+
+# prints the plugin output and exits
+# finish STATE MESSAGE
+finish()
+{
+	local names=(OK WARNING CRITICAL UNKNOWN)
+	echo "TOR PROXY ${names[$1]} - $2"
+	exit "$1"
+}
+
+is_number()
+{
+	[[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]
+}
+
+while getopts ":hVH:p:T:t:w:c:C:u:i" OPTION; do
+	case $OPTION in
+		h) usage; exit $STATE_UNKNOWN ;;
+		V) echo "check_tor_proxy $VERSION"; exit $STATE_OK ;;
+		H) HOST=$OPTARG ;;
+		p) PORT=$OPTARG ;;
+		T) TYPE=$OPTARG ;;
+		t) TIMEOUT=$OPTARG ;;
+		w) WARN=$OPTARG ;;
+		c) CRIT=$OPTARG ;;
+		C) TOOL=$OPTARG ;;
+		u) URL=$OPTARG ;;
+		i) SHOW_IP="y" ;;
+		:) echo "TOR PROXY UNKNOWN - option -$OPTARG needs an argument"; usage; exit $STATE_UNKNOWN ;;
+		?) echo "TOR PROXY UNKNOWN - invalid option -$OPTARG"; usage; exit $STATE_UNKNOWN ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] || finish $STATE_UNKNOWN "unexpected argument '$1'"
+
+# a wrong command line is UNKNOWN
+[ -n "$HOST" ] || finish $STATE_UNKNOWN "no proxy given, use -H"
+case "$TYPE" in
+	socks5) PORT=${PORT:-9050} ;;
+	http) PORT=${PORT:-8118} ;;
+	*) finish $STATE_UNKNOWN "-T takes socks5 or http, not '$TYPE'" ;;
+esac
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+	finish $STATE_UNKNOWN "-p takes a port number, not '$PORT'"
+fi
+for VALUE in "$TIMEOUT" "$WARN" "$CRIT"; do
+	[ -z "$VALUE" ] || is_number "$VALUE" || finish $STATE_UNKNOWN "-t, -w and -c take seconds, not '$VALUE'"
+done
+is_number "$TIMEOUT" && awk -v t="$TIMEOUT" 'BEGIN { exit !(t > 0) }' || finish $STATE_UNKNOWN "-t must be above 0"
+
+case "$TOOL" in
+	auto)
+		if command -v curl >/dev/null 2>&1; then
+			TOOL=curl
+		elif command -v wget >/dev/null 2>&1; then
+			TOOL=wget
+		else
+			finish $STATE_UNKNOWN "neither curl nor wget is installed"
+		fi ;;
+	curl|wget) command -v "$TOOL" >/dev/null 2>&1 || finish $STATE_UNKNOWN "$TOOL is not installed" ;;
+	*) finish $STATE_UNKNOWN "-C takes curl or wget, not '$TOOL'" ;;
+esac
+[ "$TYPE" = "socks5" ] && [ "$TOOL" = "wget" ] && finish $STATE_UNKNOWN "wget cannot use a SOCKS proxy, install curl or use -T http"
+
+# an IPv6 address needs brackets in the proxy URL
+PROXY_HOST=$HOST
+[[ "$PROXY_HOST" == *:* && "$PROXY_HOST" != \[* ]] && PROXY_HOST="[$PROXY_HOST]"
+if [ "$TYPE" = "socks5" ]; then
+	# socks5h: the proxy resolves the host name, so no DNS query leaks around Tor
+	PROXY_URL="socks5h://$PROXY_HOST:$PORT"
+else
+	PROXY_URL="http://$PROXY_HOST:$PORT"
+fi
+DESCRIPTION="$TYPE proxy $HOST:$PORT"
+
+BODY=$(mktemp) && ERR=$(mktemp) || finish $STATE_UNKNOWN "cannot create temporary files"
+trap 'rm -f "$BODY" "$ERR"' EXIT
+
+START=$(date +%s.%N)
+if [ "$TOOL" = "curl" ]; then
+	# --max-time limits the whole request; curl ignores the proxy environment with --proxy
+	STATUS=$(curl -sS --max-time "$TIMEOUT" --proxy "$PROXY_URL" -o "$BODY" -w '%{http_code}' -- "$URL" 2>"$ERR")
+	RC=$?
+	[ $RC -eq 28 ] && finish $STATE_CRITICAL "$DESCRIPTION did not answer within ${TIMEOUT}s"
+	ERROR=$(grep -v '^[[:space:]]*$' "$ERR" | head -n 1)
+else
+	# --timeout applies to each step of wget, timeout(1) limits the whole request
+	LIMIT=()
+	command -v timeout >/dev/null 2>&1 && LIMIT=(timeout "$TIMEOUT")
+	"${LIMIT[@]}" wget -nv -O "$BODY" --tries=1 --timeout="$TIMEOUT" -e use_proxy=yes \
+		-e http_proxy="$PROXY_URL" -e https_proxy="$PROXY_URL" -- "$URL" 2>"$ERR"
+	RC=$?
+	[ $RC -eq 124 ] && finish $STATE_CRITICAL "$DESCRIPTION did not answer within ${TIMEOUT}s"
+	ERROR=$(grep -v '^[[:space:]]*$' "$ERR" | grep -v ' URL:.* -> ' | head -n 1)
+	# wget -nv says e.g. "failed: Connection refused."
+	ERROR=${ERROR#failed: }
+	STATUS=200
+	if [ $RC -eq 8 ]; then
+		# the server answered with an error status, e.g. "ERROR 503: Service Unavailable."
+		STATUS=$(grep -oE 'ERROR [0-9]{3}' "$ERR" | head -n 1 | grep -oE '[0-9]{3}')
+		STATUS=${STATUS:-500}
+		RC=0
+	fi
+fi
+END=$(date +%s.%N)
+ELAPSED=$(awk -v s="$START" -v e="$END" 'BEGIN { printf "%.3f", e - s }')
+
+# a proxy that cannot be reached or does not get through is an outage
+[ $RC -eq 0 ] || finish $STATE_CRITICAL "$DESCRIPTION failed: ${ERROR:-$TOOL exited with $RC}"
+[ "$STATUS" = "200" ] || finish $STATE_UNKNOWN "$URL answered with HTTP status $STATUS through $DESCRIPTION"
+
+# the answer looks like {"IsTor":true,"IP":"185.220.101.4"}
+IS_TOR=$(grep -oE '"IsTor"[[:space:]]*:[[:space:]]*(true|false)' "$BODY" | grep -oE '(true|false)$')
+IP=$(grep -oE '"IP"[[:space:]]*:[[:space:]]*"[^"]*"' "$BODY" | sed -E 's/.*"([^"]*)"$/\1/')
+if [ -z "$IS_TOR" ]; then
+	finish $STATE_UNKNOWN "unexpected answer from $URL: $(head -c 100 "$BODY" | tr -d '\r' | tr '\n' ' ')"
+fi
+
+PERF="time=${ELAPSED}s;${WARN};${CRIT};0"
+if [ "$IS_TOR" != "true" ]; then
+	MESSAGE="$DESCRIPTION does not exit to the Tor network"
+	[ -n "$SHOW_IP" ] && MESSAGE="$MESSAGE, but via ${IP:-an unknown address}"
+	finish $STATE_CRITICAL "$MESSAGE | $PERF"
+fi
+
+STATE=$STATE_OK
+TIME_TEXT=""
+if [ -n "$CRIT" ] && awk -v a="$ELAPSED" -v b="$CRIT" 'BEGIN { exit !(a > b) }'; then
+	STATE=$STATE_CRITICAL
+	TIME_TEXT=", but took ${ELAPSED}s, more than ${CRIT}s"
+elif [ -n "$WARN" ] && awk -v a="$ELAPSED" -v b="$WARN" 'BEGIN { exit !(a > b) }'; then
+	STATE=$STATE_WARNING
+	TIME_TEXT=", but took ${ELAPSED}s, more than ${WARN}s"
+fi
+finish $STATE "$DESCRIPTION exits to the Tor network via ${IP:-an unknown address}$TIME_TEXT | $PERF"
