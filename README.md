@@ -1,6 +1,7 @@
 # check_tor_proxy
 
-A Nagios/Icinga plugin that checks whether a proxy exits to the Tor network.
+A Nagios/Icinga plugin that checks whether a proxy exits to the Tor network,
+or with `-N` that it does not.
 It asks the Tor Project's check service, https://check.torproject.org/api/ip,
 through the proxy, which answers whether the request came from a Tor exit
 node. A bash script, using curl, or wget if curl is not installed.
@@ -9,6 +10,7 @@ node. A bash script, using curl, or wget if curl is not installed.
 check_tor_proxy -H localhost                       # Tor's SOCKS port 9050
 check_tor_proxy -H proxy.example.org -T http       # an HTTP proxy such as Privoxy on port 8118
 check_tor_proxy -H proxy.example.org -T http -p 3128 -w 10 -c 20
+check_tor_proxy -H proxy.example.org -T http -N    # a proxy that must not go through Tor
 ```
 
 ```
@@ -26,6 +28,7 @@ TOR PROXY CRITICAL - http proxy proxy.example.org:8118 does not exit to the Tor 
 | `-C` | Tool to use, `curl` or `wget` (default: curl if installed, else wget) |
 | `-u` | URL to ask (default: https://check.torproject.org/api/ip) |
 | `-i` | Also show the exit IP if it is not a Tor exit |
+| `-N` | Expect a proxy that does not exit to the Tor network |
 | `-h`, `-V` | Show the help or the version |
 
 ## States
@@ -33,6 +36,9 @@ TOR PROXY CRITICAL - http proxy proxy.example.org:8118 does not exit to the Tor 
 - **OK**: the request came from a Tor exit node; the output names its IP
 - **CRITICAL**: the request did not come from a Tor exit node, the proxy
   cannot be reached or fails, or it did not answer within `-t`
+- With `-N` the first two are swapped: **OK** if the request did not come
+  from a Tor exit node, **CRITICAL** if it did. Use it for proxies that must
+  not route through Tor, e.g. a second proxy next to the Tor one.
 - **WARNING**/**CRITICAL**: the answer took longer than `-w`/`-c`
 - **UNKNOWN**: the check service answered with an error status or something
   unexpected, or the command line is wrong

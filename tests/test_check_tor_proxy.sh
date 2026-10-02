@@ -6,13 +6,14 @@ CHECK="$(cd "$(dirname "$0")/.." && pwd)/check_tor_proxy"
 FAKE_BIN=$(mktemp -d)
 trap 'rm -rf "$FAKE_BIN"' EXIT
 
-# FAKE_ANSWER: tor, notor, garbage, status503, refused, slow (a Tor exit after FAKE_SLEEP), timeout (curl only)
+# FAKE_ANSWER: tor, notor, garbage, status503, refused, slow and slow_notor (a Tor or non-Tor exit
+# after FAKE_SLEEP), timeout (curl only)
 # Both fakes log their arguments to FAKE_LOG and write the answer of the Tor check API.
 cat > "$FAKE_BIN/answer" <<'FAKE'
 #!/bin/bash
 case "$FAKE_ANSWER" in
 	tor|slow) echo '{"IsTor":true,"IP":"185.220.101.4"}' ;;
-	notor) echo '{"IsTor":false,"IP":"81.10.209.36"}' ;;
+	notor|slow_notor) echo '{"IsTor":false,"IP":"81.10.209.36"}' ;;
 	garbage) echo '<html>Sorry</html>' ;;
 esac
 FAKE
@@ -26,7 +27,7 @@ done
 case "$FAKE_ANSWER" in
 	refused) echo "curl: (7) Failed to connect to proxy port 9050 after 1 ms: Could not connect to server" >&2; exit 7 ;;
 	timeout) echo "curl: (28) Operation timed out after 1001 milliseconds with 0 bytes received" >&2; exit 28 ;;
-	slow) sleep "${FAKE_SLEEP:-0}" ;;
+	slow|slow_notor) sleep "${FAKE_SLEEP:-0}" ;;
 	status503) : > "$OUT"; printf 503; exit 0 ;;
 esac
 "$(dirname "$0")/answer" > "$OUT"
@@ -41,7 +42,7 @@ while [ $# -gt 0 ]; do
 done
 case "$FAKE_ANSWER" in
 	refused) echo "failed: Connection refused." >&2; exit 4 ;;
-	slow) sleep "${FAKE_SLEEP:-0}" ;;
+	slow|slow_notor) sleep "${FAKE_SLEEP:-0}" ;;
 	status503) echo "https://check.torproject.org/api/ip:" >&2; echo "2026-10-01 10:00:00 ERROR 503: Service Unavailable." >&2; exit 8 ;;
 esac
 "$(dirname "$0")/answer" > "$OUT"
@@ -101,6 +102,15 @@ for TOOL in curl wget; do
 		FAKE_ANSWER=slow FAKE_SLEEP=0.3 -- -H p -T $TYPE -C $TOOL -w 0.1 -c 5
 	expect "$TOOL: slower answer is CRITICAL" 2 "^TOR PROXY CRITICAL - .* but took [0-9.]+s, more than 0.2s" \
 		FAKE_ANSWER=slow FAKE_SLEEP=0.3 -- -H p -T $TYPE -C $TOOL -w 0.1 -c 0.2
+	# -N: a proxy that must not exit to Tor
+	expect "$TOOL -N: not a Tor exit is OK" 0 "^TOR PROXY OK - $TYPE proxy p:[0-9]+ does not exit to the Tor network \| time=[0-9.]+s;;;0$" \
+		FAKE_ANSWER=notor -- -H p -T $TYPE -C $TOOL -N
+	expect "$TOOL -N -i shows the exit IP" 0 "^TOR PROXY OK - .* does not exit to the Tor network, it exits via 81.10.209.36 \|" \
+		FAKE_ANSWER=notor -- -H p -T $TYPE -C $TOOL -N -i
+	expect "$TOOL -N: a Tor exit is CRITICAL" 2 "^TOR PROXY CRITICAL - $TYPE proxy p:[0-9]+ exits to the Tor network via 185.220.101.4, but must not \|" \
+		FAKE_ANSWER=tor -- -H p -T $TYPE -C $TOOL -N
+	expect "$TOOL -N: slow answer is WARNING" 1 "^TOR PROXY WARNING - .* does not exit to the Tor network, but took [0-9.]+s, more than 0.1s \|" \
+		FAKE_ANSWER=slow_notor FAKE_SLEEP=0.3 -- -H p -T $TYPE -C $TOOL -N -w 0.1 -c 5
 done
 
 expect "curl timeout" 2 "^TOR PROXY CRITICAL - socks5 proxy p:9050 did not answer within 1s$" \

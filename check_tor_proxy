@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Thomas Wagner <wagner-thomas@gmx.at>
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-VERSION="0.1"
+VERSION="0.2"
 
 # error messages of wget and the decimal point of awk in English
 export LC_ALL=C
@@ -23,13 +23,15 @@ TOOL="auto"
 WARN=""
 CRIT=""
 SHOW_IP=""
+EXPECT_TOR="y"
 
 usage()
 {
 cat << EOF
 usage: check_tor_proxy -H HOST [-p PORT] [-T socks5|http] [-t SECONDS] [-w SECONDS] [-c SECONDS]
-                       [-C curl|wget] [-u URL] [-i]
-Checks that a proxy exits to the Tor network, by asking $URL through it.
+                       [-C curl|wget] [-u URL] [-i] [-N]
+Checks that a proxy exits to the Tor network, or with -N that it does not, by asking $URL
+through it.
 OPTIONS:
  -H	host name or address of the proxy (required)
  -p	port of the proxy (default: 9050 for socks5, 8118 for http)
@@ -40,6 +42,7 @@ OPTIONS:
  -C	tool to use: curl or wget (default: curl if installed, else wget; socks5 needs curl)
  -u	URL to ask (default: $URL)
  -i	also show the exit IP if it is not a Tor exit; it is then usually your real address
+ -N	expect a proxy that does not exit to the Tor network: OK if it does not, CRITICAL if it does
  -h	show this help
  -V	show the version
 EOF
@@ -59,7 +62,7 @@ is_number()
 	[[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]
 }
 
-while getopts ":hVH:p:T:t:w:c:C:u:i" OPTION; do
+while getopts ":hVH:p:T:t:w:c:C:u:iN" OPTION; do
 	case $OPTION in
 		h) usage; exit $STATE_UNKNOWN ;;
 		V) echo "check_tor_proxy $VERSION"; exit $STATE_OK ;;
@@ -72,6 +75,7 @@ while getopts ":hVH:p:T:t:w:c:C:u:i" OPTION; do
 		C) TOOL=$OPTARG ;;
 		u) URL=$OPTARG ;;
 		i) SHOW_IP="y" ;;
+		N) EXPECT_TOR="" ;;
 		:) echo "TOR PROXY UNKNOWN - option -$OPTARG needs an argument"; usage; exit $STATE_UNKNOWN ;;
 		?) echo "TOR PROXY UNKNOWN - invalid option -$OPTARG"; usage; exit $STATE_UNKNOWN ;;
 	esac
@@ -163,10 +167,17 @@ if [ -z "$IS_TOR" ]; then
 fi
 
 PERF="time=${ELAPSED}s;${WARN};${CRIT};0"
-if [ "$IS_TOR" != "true" ]; then
+if [ "$IS_TOR" = "true" ]; then
+	MESSAGE="$DESCRIPTION exits to the Tor network via ${IP:-an unknown address}"
+	# with -N, a Tor exit is the failure
+	[ -z "$EXPECT_TOR" ] && finish $STATE_CRITICAL "$MESSAGE, but must not | $PERF"
+else
 	MESSAGE="$DESCRIPTION does not exit to the Tor network"
-	[ -n "$SHOW_IP" ] && MESSAGE="$MESSAGE, but via ${IP:-an unknown address}"
-	finish $STATE_CRITICAL "$MESSAGE | $PERF"
+	if [ -n "$EXPECT_TOR" ]; then
+		[ -n "$SHOW_IP" ] && MESSAGE="$MESSAGE, but via ${IP:-an unknown address}"
+		finish $STATE_CRITICAL "$MESSAGE | $PERF"
+	fi
+	[ -n "$SHOW_IP" ] && MESSAGE="$MESSAGE, it exits via ${IP:-an unknown address}"
 fi
 
 STATE=$STATE_OK
@@ -178,4 +189,4 @@ elif [ -n "$WARN" ] && awk -v a="$ELAPSED" -v b="$WARN" 'BEGIN { exit !(a > b) }
 	STATE=$STATE_WARNING
 	TIME_TEXT=", but took ${ELAPSED}s, more than ${WARN}s"
 fi
-finish $STATE "$DESCRIPTION exits to the Tor network via ${IP:-an unknown address}$TIME_TEXT | $PERF"
+finish $STATE "$MESSAGE$TIME_TEXT | $PERF"
