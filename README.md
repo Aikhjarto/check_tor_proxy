@@ -61,13 +61,26 @@ data.
 - An HTTP proxy only exits to Tor if it forwards to Tor; for Privoxy that is
   a line like `forward-socks5t / 127.0.0.1:9050 .` in its configuration.
 
+## Bash completion
+
+`completions/check_tor_proxy` completes the options, host names for `-H`
+and the choices of `-T` and `-C`, also when the plugin is called by its full
+path. The packages install it; otherwise copy it to bash-completion's
+directory:
+
+```sh
+install -D -m 0644 completions/check_tor_proxy /usr/share/bash-completion/completions/check_tor_proxy
+```
+
 ## Tests
 
 ```sh
 tests/test_check_tor_proxy.sh
+tests/test_completion.sh
 ```
 
-runs the plugin against fake curl and wget commands.
+runs the plugin against fake curl and wget commands, and tests the bash
+completion.
 
 ## License
 

@@ -1,0 +1,29 @@
+# bash completion for check_tor_proxy                        -*- shell-script -*-
+
+_check_tor_proxy()
+{
+    local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]}
+    COMPREPLY=()
+
+    case $prev in
+        -H)
+            mapfile -t COMPREPLY < <(compgen -A hostname -- "$cur")
+            return
+            ;;
+        -T)
+            mapfile -t COMPREPLY < <(compgen -W 'socks5 http' -- "$cur")
+            return
+            ;;
+        -C)
+            mapfile -t COMPREPLY < <(compgen -W 'curl wget' -- "$cur")
+            return
+            ;;
+        -p | -t | -w | -c | -u)
+            return
+            ;;
+    esac
+
+    # no positional arguments: offer the options
+    mapfile -t COMPREPLY < <(compgen -W '-H -p -T -t -w -c -C -u -i -N -h -V' -- "$cur")
+}
+complete -F _check_tor_proxy check_tor_proxy
